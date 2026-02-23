@@ -649,6 +649,7 @@ class AMRBicycleEnv(gym.Env):
 
         # Precompute EDT + cost-to-go once (forest maps are static).
         self._eps_cell_m = float(math.sqrt(2.0) * 0.5 * self.cell_size_m)
+        self._half_cell_m = float(0.5 * self.cell_size_m)
         self._dist_m = compute_edt_distance_m(self._grid, cell_size_m=self.cell_size_m)
         self._diag_m = float(
             math.hypot(float(self._width - 1) * self.cell_size_m, float(self._height - 1) * self.cell_size_m)
@@ -1281,10 +1282,10 @@ class AMRBicycleEnv(gym.Env):
         d2 = self._dist_at_m(c2[0], c2[1])
         r = float(self.footprint.radius_m)
         od_m = min(d1 - r, d2 - r)
-        # Collision when the footprint intersects an obstacle boundary (OD <= 0).
-        # The EDT already returns an approximate boundary distance (center-to-boundary), so adding an
-        # extra eps margin here can be overly conservative and cause false collisions in tight gaps.
-        collision = (d1 <= r) or (d2 <= r)
+        # EDT measures center-to-center distance; add half-cell margin to account
+        # for the obstacle cell extending 0.5*cell_size from its center.
+        r_col = r + self._half_cell_m
+        collision = (d1 <= r_col) or (d2 <= r_col)
         return float(od_m), bool(collision)
 
     def _od_and_collision_at_pose_m(self, x_m: float, y_m: float, psi_rad: float) -> tuple[float, bool]:
@@ -1302,7 +1303,8 @@ class AMRBicycleEnv(gym.Env):
         d2 = self._dist_at_m(c2x, c2y)
         r = float(self.footprint.radius_m)
         od_m = min(float(d1) - r, float(d2) - r)
-        collision = (float(d1) <= r) or (float(d2) <= r)
+        r_col = r + self._half_cell_m
+        collision = (float(d1) <= r_col) or (float(d2) <= r_col)
         return float(od_m), bool(collision)
 
     def _od_and_collision_at_pose_m_vec(
@@ -1330,7 +1332,8 @@ class AMRBicycleEnv(gym.Env):
         d2 = self._dist_at_m_vec(c2x, c2y)
         r = float(self.footprint.radius_m)
         od = np.minimum(d1 - r, d2 - r)
-        coll = (d1 <= r) | (d2 <= r)
+        r_col = r + self._half_cell_m
+        coll = (d1 <= r_col) | (d2 <= r_col)
 
         od = np.where(in_bounds, od, -float("inf")).astype(np.float64, copy=False)
         coll = np.where(in_bounds, coll, True).astype(np.bool_, copy=False)
