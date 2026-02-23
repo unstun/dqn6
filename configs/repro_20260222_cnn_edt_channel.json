@@ -1,0 +1,27 @@
+{
+  "date": "2026-02-22",
+  "topic": "cnn_edt_channel_split_obs",
+  "summary": "Add EDT distance map as 3rd CNN observation channel; MLP agents auto-strip EDT channel to keep 11+2*N^2 observation (avoids noise from spatial features MLP cannot exploit). Env emits 11+3*N^2; agent._prep_obs() slices per arch.",
+  "changes": [
+    "amr_dqn/env.py: precompute downsampled EDT map, append as 3rd channel in _observe(), obs_dim=11+3*N^2",
+    "amr_dqn/networks.py: infer_flat_obs_cnn_layout supports (11, 3) layout",
+    "amr_dqn/agents.py: MLP auto-strips EDT (11+3*N^2 -> 11+2*N^2); _prep_obs() slices in act/observe"
+  ],
+  "why_split": "Run3 (train_20260223_133849) showed all-3ch harmed MLP: SR dropped 1.0->0.8 on long, and all 3 MLP variants converged to identical policies. The extra 144 EDT dims act as noise for MLP (flat features, no spatial inductive bias). CNN benefits from EDT channel (CNN-PDDQN long SR recovered 0.5->1.0).",
+  "reproduce": "conda run --cwd /home/sun/phdproject/dqn/DQN6 -n ros2py310 python train.py --profile forest_a_all6_300_cuda && conda run --cwd /home/sun/phdproject/dqn/DQN6 -n ros2py310 python infer.py --profile forest_a_all6_300_cuda",
+  "seed": 0,
+  "key_hyperparams": {
+    "episodes": 300,
+    "obs_map_size": 12,
+    "env_obs_channels": 3,
+    "mlp_effective_channels": 2,
+    "cnn_effective_channels": 3,
+    "edt_cap_m": "od_cap_m (2.0)",
+    "collision_radius": "radius_m + half_cell_m"
+  },
+  "prior_runs": {
+    "run1_baseline": "train_20260223_111523 (old collision d<=r, 2ch) — best overall",
+    "run2_new_collision": "train_20260223_121627 (new collision r+half_cell, 2ch) — CNN-DQN/PDDQN long collapsed",
+    "run3_all_3ch": "train_20260223_133849 (new collision, 3ch for all) — MLP degraded, CNN-PDDQN recovered"
+  }
+}

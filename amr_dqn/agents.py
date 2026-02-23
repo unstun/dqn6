@@ -101,6 +101,13 @@ class DQNFamilyAgent:
 
         # DQN is the baseline (plain Q-learning).
         # DDQN keeps the same architecture but uses the Double DQN TD target (online argmax + target eval).
+        #
+        # Observation split: CNN uses all 3 map channels (occ + cost + EDT clearance),
+        # MLP drops the EDT channel (last N² dims) to avoid extra noise from spatial
+        # features that MLP cannot exploit.  See repro_20260222_cnn_edt_channel.json.
+        self._env_obs_dim = int(obs_dim)
+        effective_obs_dim = int(obs_dim)
+
         self._net_cls: type[nn.Module]
         self._net_kwargs: dict[str, object]
         if self.arch == "cnn":
@@ -112,9 +119,15 @@ class DQNFamilyAgent:
                 "map_size": int(layout.map_size),
             }
         else:
+            # Strip the 3rd map channel (EDT) when present: 11+3*N² → 11+2*N².
+            map_rem = int(obs_dim) - 11
+            if map_rem > 0 and map_rem % 3 == 0:
+                n_sq = map_rem // 3
+                effective_obs_dim = 11 + 2 * n_sq
             self._net_cls = MLPQNetwork
             self._net_kwargs = {}
 
+        obs_dim = effective_obs_dim
         self.q = self._net_cls(obs_dim, n_actions, hidden_dim=config.hidden_dim, hidden_layers=config.hidden_layers, **self._net_kwargs).to(self.device)
         self.q_target = self._net_cls(obs_dim, n_actions, hidden_dim=config.hidden_dim, hidden_layers=config.hidden_layers, **self._net_kwargs).to(self.device)
         self.q_target.load_state_dict(self.q.state_dict())
@@ -155,12 +168,19 @@ class DQNFamilyAgent:
             decay_episodes=self.config.eps_decay,
         )
 
+    def _prep_obs(self, obs: np.ndarray) -> np.ndarray:
+        """Slice env observation to the effective dim used by this agent's network."""
+        if self._obs_dim < self._env_obs_dim:
+            return np.asarray(obs, dtype=np.float32).ravel()[: self._obs_dim]
+        return np.asarray(obs, dtype=np.float32).ravel()
+
     def act(self, obs: np.ndarray, *, episode: int, explore: bool = True) -> int:
         if explore and (self._rng.random() < self.epsilon(episode)):
             return int(self._rng.integers(0, self._n_actions))
 
+        obs = self._prep_obs(obs)
         with torch.no_grad():
-            x = torch.from_numpy(obs.astype(np.float32, copy=False)).to(self.device)
+            x = torch.from_numpy(obs).to(self.device)
             q = self.q(x.unsqueeze(0)).squeeze(0)
             return int(torch.argmax(q).item())
 
@@ -188,8 +208,9 @@ class DQNFamilyAgent:
                 return int(self._rng.integers(0, self._n_actions))
             return int(self._rng.choice(idxs))
 
+        obs = self._prep_obs(obs)
         with torch.no_grad():
-            x = torch.from_numpy(obs.astype(np.float32, copy=False)).to(self.device)
+            x = torch.from_numpy(obs).to(self.device)
             q = self.q(x.unsqueeze(0)).squeeze(0)
             if mask is not None:
                 q = q.clone()
@@ -198,9 +219,10 @@ class DQNFamilyAgent:
 
     def top_actions(self, obs: np.ndarray, *, k: int) -> np.ndarray:
         """Return the top-k action indices by Q-value (descending)."""
+        obs = self._prep_obs(obs)
         kk = int(max(1, int(k)))
         with torch.no_grad():
-            x = torch.from_numpy(obs.astype(np.float32, copy=False)).to(self.device)
+            x = torch.from_numpy(obs).to(self.device)
             q = self.q(x.unsqueeze(0)).squeeze(0)
             kk = int(min(int(kk), int(q.numel())))
             return torch.topk(q, k=kk, dim=0).indices.detach().cpu().numpy()
@@ -246,6 +268,8 @@ class DQNFamilyAgent:
         for time-limit episode ends so the n-step buffer does not leak across episodes while
         still allowing bootstrapping from the final state.
         """
+        obs = self._prep_obs(obs)
+        next_obs = self._prep_obs(next_obs)
 
         if int(self._n_step) <= 1:
             self._add_to_replay(

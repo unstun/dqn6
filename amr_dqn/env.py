@@ -751,7 +751,16 @@ class AMRBicycleEnv(gym.Env):
         ).astype(np.float32, copy=False)
         self._obs_cost_flat = (2.0 * cost_ds.reshape(-1) - 1.0).astype(np.float32, copy=False)
 
-        obs_dim = 11 + 2 * int(self.obs_map_size) * int(self.obs_map_size)
+        # EDT clearance map: normalised distance-to-nearest-obstacle, capped at od_cap_m.
+        edt01 = np.clip(self._dist_m / max(1e-6, float(self.od_cap_m)), 0.0, 1.0).astype(np.float32, copy=False)
+        edt_ds = cv2.resize(
+            edt01,
+            dsize=(int(self.obs_map_size), int(self.obs_map_size)),
+            interpolation=cv2.INTER_AREA,
+        ).astype(np.float32, copy=False)
+        self._obs_edt_flat = (2.0 * edt_ds.reshape(-1) - 1.0).astype(np.float32, copy=False)
+
+        obs_dim = 11 + 3 * int(self.obs_map_size) * int(self.obs_map_size)
         self.observation_space = gym.spaces.Box(
             low=-1.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -1899,6 +1908,7 @@ class AMRBicycleEnv(gym.Env):
                 ),
                 self._obs_occ_flat,
                 self._obs_cost_flat,
+                self._obs_edt_flat,
             ]
         )
         return obs.astype(np.float32, copy=False)
