@@ -35,6 +35,7 @@ from amr_dqn.baselines.pathplan import (
     point_footprint,
 )
 from amr_dqn.env import AMRBicycleEnv, AMRGridEnv, RewardWeights
+from amr_dqn.forest_policy import forest_select_action
 from amr_dqn.maps import FOREST_ENV_ORDER, get_map_spec
 from amr_dqn.metrics import KPI, avg_abs_curvature, max_corner_degree, num_path_corners, path_length
 from amr_dqn.smoothing import chaikin_smooth
@@ -128,48 +129,12 @@ def rollout_agent(
             sync_cuda()
             t0 = time.perf_counter()
         if isinstance(env, AMRBicycleEnv):
-            # Forest policy rollout: greedy Q policy with admissible-action safety gating.
-            # Optionally, tie-break top-k actions using a lightweight Hybrid A* reference tracker
-            # (precomputed path; no online planning during inference).
-            with torch.no_grad():
-                x = torch.from_numpy(agent._prep_obs(obs)).to(agent.device)
-                q = agent.q(x.unsqueeze(0)).squeeze(0)
-
-            a0 = int(torch.argmax(q).item())
-            a = int(a0)
-
-            a0_adm = bool(env.is_action_admissible(int(a0), horizon_steps=adm_h, min_od_m=min_od, min_progress_m=min_prog))
-            if not a0_adm:
-                chosen: int | None = None
-                kk = int(min(int(topk_k), int(q.numel())))
-                topk = torch.topk(q, k=kk, dim=0).indices.detach().cpu().numpy()
-                for cand in topk.tolist():
-                    cand_i = int(cand)
-                    if cand_i == int(a0):
-                        continue
-                    if bool(env.is_action_admissible(cand_i, horizon_steps=adm_h, min_od_m=min_od, min_progress_m=min_prog)):
-                        chosen = int(cand_i)
-                        break
-
-                if chosen is None:
-                    # If there are no safe actions that make short-horizon cost-to-go progress,
-                    # fall back to a lightweight heuristic rollout instead of picking an arbitrary
-                    # "safe but stalled" action by Q-value (which often collapses to stopping).
-                    prog_mask = env.admissible_action_mask(
-                        horizon_steps=adm_h,
-                        min_od_m=min_od,
-                        min_progress_m=min_prog,
-                        fallback_to_safe=False,
-                    )
-                    if bool(prog_mask.any()):
-                        q_masked = q.clone()
-                        q_masked[torch.from_numpy(~prog_mask).to(q.device)] = torch.finfo(q_masked.dtype).min
-                        chosen = int(torch.argmax(q_masked).item())
-                    else:
-                        chosen = int(env._fallback_action_short_rollout(horizon_steps=adm_h, min_od_m=min_od))
-
-                if chosen is not None:
-                    a = int(chosen)
+            a = forest_select_action(
+                env, agent, obs,
+                episode=0, explore=False,
+                horizon_steps=adm_h, topk=topk_k,
+                min_od_m=min_od, min_progress_m=min_prog,
+            )
         else:
             a = agent.act(obs, episode=0, explore=False)
         if time_mode == "policy":

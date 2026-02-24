@@ -22,6 +22,7 @@ import torch
 from amr_dqn.agents import AgentConfig, DQNFamilyAgent, parse_rl_algo
 from amr_dqn.config_io import apply_config_defaults, load_json, resolve_config_path, select_section
 from amr_dqn.env import AMRBicycleEnv, AMRGridEnv, RewardWeights
+from amr_dqn.forest_policy import forest_compute_next_mask, forest_select_action
 from amr_dqn.maps import FOREST_ENV_ORDER, get_map_spec
 
 
@@ -234,6 +235,7 @@ def collect_forest_demos(
     forest_expert: str,
     forest_demo_horizon: int,
     forest_demo_w_clearance: float,
+    forest_adm_horizon: int = 15,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     expert = str(forest_expert).lower().strip()
     if expert == "auto":
@@ -282,12 +284,7 @@ def collect_forest_demos(
                 w_clearance=float(forest_demo_w_clearance),
             )
             next_obs, reward, done, truncated, info = env.step(int(a))
-            next_mask = env.admissible_action_mask(
-                horizon_steps=6,
-                min_od_m=0.0,
-                min_progress_m=1e-4,
-                fallback_to_safe=True,
-            )
+            next_mask = forest_compute_next_mask(env, horizon_steps=int(forest_adm_horizon))
             reached = bool(reached or bool(info.get("reached", False)))
             ep.append((obs, int(a), float(reward), next_obs, bool(done), bool(truncated), next_mask))
             obs = next_obs
@@ -340,6 +337,8 @@ def train_one(
     forest_expert: str,
     forest_expert_exploration: bool,
     forest_action_shield: bool,
+    forest_adm_horizon: int,
+    forest_topk: int,
     forest_expert_prob_start: float,
     forest_expert_prob_final: float,
     forest_expert_prob_decay: float,
@@ -479,12 +478,7 @@ def train_one(
                 while not (done or truncated):
                     a = forest_expert_action_local()
                     next_obs, reward, done, truncated, info = env.step(a)
-                    next_mask = env.admissible_action_mask(
-                        horizon_steps=6,
-                        min_od_m=0.0,
-                        min_progress_m=1e-4,
-                        fallback_to_safe=True,
-                    )
+                    next_mask = forest_compute_next_mask(env, horizon_steps=int(forest_adm_horizon))
                     reached = bool(reached or bool(info.get("reached", False)))
                     ep.append((obs, int(a), float(reward), next_obs, bool(done), bool(truncated), next_mask))
                     obs = next_obs
@@ -523,18 +517,12 @@ def train_one(
                 trunc_eval = False
                 reached_eval = False
                 while not (done_eval or trunc_eval):
-                    a_eval = agent.act(obs_eval, episode=0, explore=False)
-                    if not bool(env.is_action_admissible(int(a_eval), horizon_steps=15, min_od_m=0.0, min_progress_m=1e-4)):
-                        prog_mask = env.admissible_action_mask(
-                            horizon_steps=15,
-                            min_od_m=0.0,
-                            min_progress_m=1e-4,
-                            fallback_to_safe=False,
-                        )
-                        if bool(prog_mask.any()):
-                            a_eval = agent.act_masked(obs_eval, episode=0, explore=False, action_mask=prog_mask)
-                        else:
-                            a_eval = int(env._fallback_action_short_rollout(horizon_steps=15, min_od_m=0.0))
+                    a_eval = forest_select_action(
+                        env, agent, obs_eval,
+                        episode=0, explore=False,
+                        horizon_steps=int(forest_adm_horizon),
+                        topk=int(forest_topk),
+                    )
                     obs_eval, _r, done_eval, trunc_eval, info_eval = env.step(int(a_eval))
                     if bool(info_eval.get("reached", False)):
                         reached_eval = True
@@ -556,20 +544,12 @@ def train_one(
 
     def eval_action(obs_eval: np.ndarray) -> int:
         if isinstance(env, AMRBicycleEnv):
-            a_eval = agent.act(obs_eval, episode=0, explore=False)
-            if not bool(env.is_action_admissible(int(a_eval), horizon_steps=15, min_od_m=0.0, min_progress_m=1e-4)):
-                prog_mask = env.admissible_action_mask(
-                    horizon_steps=15,
-                    min_od_m=0.0,
-                    min_progress_m=1e-4,
-                    fallback_to_safe=False,
-                )
-                if bool(prog_mask.any()):
-                    a_eval = agent.act_masked(obs_eval, episode=0, explore=False, action_mask=prog_mask)
-                else:
-                    a_eval = int(env._fallback_action_short_rollout(horizon_steps=15, min_od_m=0.0))
-            return int(a_eval)
-
+            return forest_select_action(
+                env, agent, obs_eval,
+                episode=0, explore=False,
+                horizon_steps=int(forest_adm_horizon),
+                topk=int(forest_topk),
+            )
         return int(agent.act(obs_eval, episode=0, explore=False))
 
     def eval_greedy_metrics() -> dict[str, float]:
@@ -688,18 +668,8 @@ def train_one(
             p = float(np.clip(p_raw / ramp, 0.0, 1.0))
             reset_options = {"curriculum_progress": p, "curriculum_band_m": float(curriculum_band_m)}
         obs, _ = env.reset(seed=seed + ep, options=reset_options)
-        action_mask = None
-        if bool(forest_action_shield) and isinstance(env, AMRBicycleEnv):
-            # Apply the same admissible-action constraints during training as used at inference
-            # time (safety/progress "shield"). This avoids the common failure mode where the
-            # greedy Q action is systematically inadmissible and inference falls back to
-            # heuristics/top-k actions (yielding longer paths).
-            action_mask = env.admissible_action_mask(
-                horizon_steps=6,
-                min_od_m=0.0,
-                min_progress_m=1e-4,
-                fallback_to_safe=True,
-            )
+        adm_h = int(forest_adm_horizon)
+        topk_k = int(forest_topk)
         ep_return = 0.0
         done = False
         truncated = False
@@ -724,38 +694,24 @@ def train_one(
                     action = forest_expert_action_local()
                     used_expert = True
                 else:
-                    if action_mask is not None:
-                        action = agent.act_masked(obs, episode=ep, explore=True, action_mask=action_mask)
-                    else:
-                        action = agent.act(obs, episode=ep, explore=True)
-                        if not bool(env.is_action_admissible(int(action), horizon_steps=6, min_od_m=0.0, min_progress_m=1e-4)):
-                            prog_mask = env.admissible_action_mask(
-                                horizon_steps=6,
-                                min_od_m=0.0,
-                                min_progress_m=1e-4,
-                                fallback_to_safe=False,
-                            )
-                            if bool(prog_mask.any()):
-                                action = agent.act_masked(obs, episode=ep, explore=True, action_mask=prog_mask)
-                            else:
-                                action = int(env._fallback_action_short_rollout(horizon_steps=6, min_od_m=0.0))
+                    action = forest_select_action(
+                        env, agent, obs,
+                        episode=ep, explore=True,
+                        horizon_steps=adm_h, topk=topk_k,
+                    )
+            elif bool(forest_action_shield) and isinstance(env, AMRBicycleEnv):
+                action = forest_select_action(
+                    env, agent, obs,
+                    episode=ep, explore=True,
+                    horizon_steps=adm_h, topk=topk_k,
+                )
             else:
-                if action_mask is not None:
-                    action = agent.act_masked(obs, episode=ep, explore=True, action_mask=action_mask)
-                else:
-                    action = agent.act(obs, episode=ep, explore=True)
+                action = agent.act(obs, episode=ep, explore=True)
             next_obs, reward, done, truncated, info = env.step(action)
             last_info = dict(info)
             next_mask = None
             if isinstance(env, AMRBicycleEnv):
-                next_mask = env.admissible_action_mask(
-                    horizon_steps=6,
-                    min_od_m=0.0,
-                    min_progress_m=1e-4,
-                    fallback_to_safe=True,
-                )
-                if action_mask is not None:
-                    action_mask = next_mask
+                next_mask = forest_compute_next_mask(env, horizon_steps=adm_h)
             # Time-limit truncation should not be treated as terminal for bootstrapping.
             # Only mark expert transitions as demos when the *episode* reaches the goal.
             # Failed expert steps are still useful off-policy data, but should not be imitated/preserved.
@@ -874,18 +830,12 @@ def train_one(
             while not (done or truncated):
                 steps += 1
                 if isinstance(env, AMRBicycleEnv):
-                    a = agent.act(obs, episode=0, explore=False)
-                    if not bool(env.is_action_admissible(int(a), horizon_steps=15, min_od_m=0.0, min_progress_m=1e-4)):
-                        prog_mask = env.admissible_action_mask(
-                            horizon_steps=15,
-                            min_od_m=0.0,
-                            min_progress_m=1e-4,
-                            fallback_to_safe=False,
-                        )
-                        if bool(prog_mask.any()):
-                            a = agent.act_masked(obs, episode=0, explore=False, action_mask=prog_mask)
-                        else:
-                            a = int(env._fallback_action_short_rollout(horizon_steps=15, min_od_m=0.0))
+                    a = forest_select_action(
+                        env, agent, obs,
+                        episode=0, explore=False,
+                        horizon_steps=int(forest_adm_horizon),
+                        topk=int(forest_topk),
+                    )
                 else:
                     a = agent.act(obs, episode=0, explore=False)
                 obs, r, done, truncated, info = env.step(a)
@@ -909,18 +859,12 @@ def train_one(
             last_info: dict[str, object] = {}
             while not (done or truncated):
                 steps += 1
-                a = agent.act(obs, episode=0, explore=False)
-                if not bool(env.is_action_admissible(int(a), horizon_steps=15, min_od_m=0.0, min_progress_m=1e-4)):
-                    prog_mask = env.admissible_action_mask(
-                        horizon_steps=15,
-                        min_od_m=0.0,
-                        min_progress_m=1e-4,
-                        fallback_to_safe=False,
-                    )
-                    if bool(prog_mask.any()):
-                        a = agent.act_masked(obs, episode=0, explore=False, action_mask=prog_mask)
-                    else:
-                        a = int(env._fallback_action_short_rollout(horizon_steps=15, min_od_m=0.0))
+                a = forest_select_action(
+                    env, agent, obs,
+                    episode=0, explore=False,
+                    horizon_steps=int(forest_adm_horizon),
+                    topk=int(forest_topk),
+                )
                 obs, r, done, truncated, info = env.step(a)
                 last_info = dict(info)
                 ret += float(r)
@@ -1121,6 +1065,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Forest-only: apply an admissible-action mask (safety/progress shield) to the agent's actions during training. "
             "Recommended to keep enabled even when --no-forest-expert-exploration is used to avoid train/infer mismatch."
         ),
+    )
+    ap.add_argument(
+        "--forest-adm-horizon",
+        type=int,
+        default=15,
+        help="Forest-only: admissible-action horizon steps (unified with infer).",
+    )
+    ap.add_argument(
+        "--forest-topk",
+        type=int,
+        default=10,
+        help="Forest-only: try the top-k greedy actions before computing a full admissible-action mask.",
     )
     ap.add_argument(
         "--forest-expert",
@@ -1381,6 +1337,7 @@ def main(argv: list[str] | None = None) -> int:
                     forest_expert=str(args.forest_expert),
                     forest_demo_horizon=int(args.forest_demo_horizon),
                     forest_demo_w_clearance=float(args.forest_demo_w_clearance),
+                    forest_adm_horizon=int(args.forest_adm_horizon),
                 )
         else:
             env = AMRGridEnv(
@@ -1423,6 +1380,8 @@ def main(argv: list[str] | None = None) -> int:
                 forest_expert=str(args.forest_expert),
                 forest_expert_exploration=bool(args.forest_expert_exploration),
                 forest_action_shield=bool(args.forest_action_shield),
+                forest_adm_horizon=int(args.forest_adm_horizon),
+                forest_topk=int(args.forest_topk),
                 forest_expert_prob_start=float(args.forest_expert_prob_start),
                 forest_expert_prob_final=float(args.forest_expert_prob_final),
                 forest_expert_prob_decay=float(args.forest_expert_prob_decay),
