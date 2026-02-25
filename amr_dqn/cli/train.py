@@ -1158,7 +1158,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--eps-decay",
         type=int,
         default=None,
-        help="Override AgentConfig.eps_decay (epsilon-greedy decay episodes). Default: AgentConfig default (2000).",
+        help="Override AgentConfig.eps_decay. Default: auto = max(200, int(0.8 * episodes)).",
+    )
+    ap.add_argument(
+        "--replay-capacity",
+        type=int,
+        default=None,
+        help="Replay buffer capacity. Default: auto = max(100_000, episodes * 100).",
     )
     ap.add_argument("--gamma", type=float, default=None, help="Override AgentConfig.gamma (discount factor).")
     ap.add_argument("--learning-rate", type=float, default=None, help="Override AgentConfig.learning_rate.")
@@ -1266,8 +1272,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Build AgentConfig with optional CLI/JSON overrides.
     agent_kw: dict[str, object] = {}
+    # eps_decay: explicit > auto-scale (80% of episodes, min 200)
     if args.eps_decay is not None:
         agent_kw["eps_decay"] = int(args.eps_decay)
+    else:
+        agent_kw["eps_decay"] = max(200, int(0.8 * args.episodes))
+    # replay_capacity: explicit > auto-scale (episodes * 100, min 100_000)
+    if args.replay_capacity is not None:
+        agent_kw["replay_capacity"] = int(args.replay_capacity)
+    else:
+        agent_kw["replay_capacity"] = max(100_000, args.episodes * 100)
     if args.gamma is not None:
         agent_kw["gamma"] = float(args.gamma)
     if args.learning_rate is not None:
@@ -1476,10 +1490,9 @@ def main(argv: list[str] | None = None) -> int:
             series = curves.get(env_name, {}).get(str(algo))
             if series is None:
                 continue
-            series_plot = moving_average(series, args.ma_window)
             ax.plot(
                 range(1, args.episodes + 1),
-                series_plot,
+                series,
                 label=algo_labels.get(str(algo), str(algo).upper()),
                 linewidth=1.0,
             )

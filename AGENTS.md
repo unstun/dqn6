@@ -10,7 +10,7 @@
 4) DQN/DDQN等术语遵循原论文；不确定先查证。
 5) 代码改动后在`configs/`新增`repro_YYYYMMDD_<topic>.json`；纯文档豁免。
 6) `AGENTS.md`与`CLAUDE.md`逐行一致；改后`diff -u AGENTS.md CLAUDE.md`验证。
-7) 训练/推理优先SSH远端，先同步代码再训练。
+7) 训练/推理本地执行（SSH远端不可用）。
 
 ## 1. 常用命令
 
@@ -33,12 +33,10 @@
 - WebFetch/WebSearch不混批；每批同类≤2；优先arXiv/GitHub HTML版。
 - 付费墙403：Playwright（`browser_navigate`→`browser_wait_for`5s→`browser_snapshot`）。
 
-### 2.4 SSH远端工作流
+### 2.4 本地执行工作流
 
-`REMOTE=ubuntu-zt` / `PROJ=/home/sun/phdproject/dqn/DQN6` / `ENV=ros2py310`
+`PROJ=/home/sun/phdproject/dqn/DQN6` / `ENV=ros2py310`
 
-0. **同步代码**：`rsync -av --exclude='runs/' --exclude='__pycache__/' $PROJ/ $REMOTE:$PROJ/`
-1. **启动**：`ssh $REMOTE 'cd $PROJ; nohup bash -lc "conda run --cwd $PROJ -n $ENV python train.py --profile $PROFILE && conda run --cwd $PROJ -n $ENV python infer.py --profile $PROFILE" > runs/${PROFILE}_$(date +%Y%m%d_%H%M%S).log 2>&1 & echo PID=$!'`
-2. **按需检查**：`ssh $REMOTE "ls $PROJ/runs/$EXP/train_*/infer/*/table2_kpis.csv 2>/dev/null && echo DONE || echo RUNNING"`
-3. **回填**：`rsync -av --partial $REMOTE:$PROJ/runs/$EXP/train_<ts>/ $PROJ/runs/$EXP/train_<ts>/`；更新`latest.txt`
-4. **校验**：远端/本地文件数一致 + `table2_kpis.csv`存在 + `latest.txt`正确
+0. **训练**：`nohup conda run --cwd $PROJ -n $ENV python train.py --profile $PROFILE > runs/${PROFILE}_$(date +%Y%m%d_%H%M%S).log 2>&1 &`
+1. **推理**：`conda run --cwd $PROJ -n $ENV python infer.py --profile $PROFILE`
+2. **检查完成**：`ls $PROJ/runs/$EXP/train_*/infer/*/table2_kpis.csv 2>/dev/null && echo DONE || echo RUNNING`
