@@ -1282,6 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
         agent_kw["replay_capacity"] = int(args.replay_capacity)
     else:
         agent_kw["replay_capacity"] = max(100_000, args.episodes * 100)
+    # eval_every: explicit (>0) > auto-scale (episodes // 30, min 10, ~30 eval points per run)
+    _eval_every = args.eval_every if args.eval_every > 0 else max(10, args.episodes // 30)
     if args.gamma is not None:
         agent_kw["gamma"] = float(args.gamma)
     if args.learning_rate is not None:
@@ -1432,7 +1434,7 @@ def main(argv: list[str] | None = None) -> int:
                 forest_rand_max_cost_m=rand_max,
                 forest_rand_fixed_prob=float(args.forest_rand_fixed_prob),
                 forest_rand_tries=int(args.forest_rand_tries),
-                eval_every=int(args.eval_every),
+                eval_every=_eval_every,
                 eval_runs=int(args.eval_runs),
                 eval_score_time_weight=float(args.eval_score_time_weight),
                 progress=progress,
